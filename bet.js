@@ -1,7 +1,12 @@
-const express = require('express');
-const https = require('https');
-const http = require('http');
+const express = require("express");
+const cors = require("cors");
+const http = require("http");
+const https = require("https");
+
 const app = express();
+
+app.use(cors());
+app.use(express.json());
 
 // =========================================================================
 // 1. CẤU HÌNH HỆ THỐNG VÀ BỘ NHỚ ĐỆM ĐỒNG BỘ REALTIME
@@ -12,9 +17,13 @@ const URL_MD5 = "https://wtxmd52.macminim6.online/v1/txmd5/sessions";
 const USER_ID = "@phong296 VIPPRO";
 
 const STABILITY_WEIGHTS = {
-    pattern_matching: 0.30, markov: 0.20, bet: 0.15, ping_pong: 0.15, cau_hinh_hoc: 0.15, overall_stats: 0.05
+    pattern_matching: 0.35,
+    markov: 0.25,
+    bet: 0.10,
+    ping_pong: 0.10,
+    cau_hinh_hoc: 0.15,
+    overall_stats: 0.05
 };
-
 let cacheHistoryTaiXiu = [];
 let cacheHistoryMD5 = [];
 
@@ -34,28 +43,64 @@ function fetchJson(url) {
 // 2. HỆ THỐNG THUẬT TOÁN ĐOÁN CẦU ĐA TẦNG
 // =========================================================================
 function getPatternMatchingVote(history) {
-    if (history.length < 10) return { vote: null, name: "PATTERN" };
-    const last4 = history.slice(-4).join(',');
-    let taiCount = 0, xiuCount = 0;
-    for (let i = 0; i < history.length - 5; i++) {
-        if (history.slice(i, i + 4).join(',') === last4) {
-            if (history[i + 4] === "TAI") taiCount++; else xiuCount++;
+    if (history.length < 30) return { vote:null,name:"PATTERN" };
+
+    let scores={TAI:0,XIU:0};
+
+    for(let len=6;len>=3;len--){
+        const pattern=history.slice(-len).join(',');
+
+        for(let i=0;i<history.length-len-1;i++){
+
+            if(history.slice(i,i+len).join(',')===pattern){
+
+                const next=history[i+len];
+
+                if(next==="TAI") scores.TAI+=len;
+                else scores.XIU+=len;
+            }
+
         }
     }
-    return taiCount > xiuCount ? { vote: "TAI", name: "PATTERN" } : xiuCount > taiCount ? { vote: "XIU", name: "PATTERN" } : { vote: null, name: "PATTERN" };
+
+    if(scores.TAI==scores.XIU)
+        return {vote:null,name:"PATTERN"};
+
+    return {
+        vote:scores.TAI>scores.XIU?"TAI":"XIU",
+        name:"PATTERN"
+    };
 }
 
-function getMarkovVote(history) {
-    if (history.length < 20) return { vote: null, name: "MARKOV" };
-    const last2 = history.slice(-2).join(',');
-    let t = 0, x = 0;
-    for (let i = 0; i < history.length - 3; i++) {
-        if (history.slice(i, i + 2).join(',') === last2) {
-            if (history[i + 2] === "TAI") t++; else x++;
+function getMarkovVote(history){
+
+    if(history.length<50)
+        return {vote:null,name:"MARKOV"};
+
+    const state=history.slice(-3).join(',');
+
+    let t=0,x=0;
+
+    for(let i=0;i<history.length-4;i++){
+
+        if(history.slice(i,i+3).join(',')===state){
+
+            if(history[i+3]=="TAI") t++;
+            else x++;
+
         }
+
     }
-    return t > x ? { vote: "TAI", name: "MARKOV" } : x > t ? { vote: "XIU", name: "MARKOV" } : { vote: null, name: "MARKOV" };
+
+    if(t==x) return {vote:null,name:"MARKOV"};
+
+    return {
+        vote:t>x?"TAI":"XIU",
+        name:"MARKOV"
+    };
+
 }
+
 
 const checkBet = h => (h.length >= 4 && new Set(h.slice(-4)).size === 1) ? { vote: h.slice(-1), name: "CẦU BỆT" } : { vote: null, name: "CẦU BỆT" };
 
@@ -259,79 +304,244 @@ const getScriptContent = (typeKey) => `
 // 4. HTTP SERVER ĐIỀU PHỐI ĐA KÊNH API DỰ ĐOÁN VÀ ĐƯỜNG DẪN HTML TÁCH BIỆT
 // =========================================================================
 const server = http.createServer((req, res) => {
-    
+
+    // =========================
+    // CORS
+    // =========================
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
+
+    if (req.method === "OPTIONS") {
+        res.writeHead(204);
+        return res.end();
+    }
+
     const getCleanPrediction = (cacheList) => {
         const pendingItem = cacheList.find(item => item.trang_thai === "PENDING");
+
         if (!pendingItem) return {};
+
         return {
-            "phien_hien_tai": pendingItem.phien_hien_tai,
-            "du_doan": pendingItem.du_doan,
-            "do_tin_cay": pendingItem.do_tin_cay,
-            "cau_khớp": pendingItem.cau,
-            "id": pendingItem.id
+            phien_hien_tai: pendingItem.phien_hien_tai,
+            du_doan: pendingItem.du_doan,
+            do_tin_cay: pendingItem.do_tin_cay,
+            cau_khop: pendingItem.cau,
+            id: pendingItem.id
         };
     };
 
-    if (req.url === '/taixiu') {
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    // =========================
+    // API JSON
+    // =========================
+    if (req.url === "/taixiu") {
+        res.writeHead(200, {
+            "Content-Type": "application/json; charset=utf-8"
+        });
         return res.end(JSON.stringify(getCleanPrediction(cacheHistoryTaiXiu)));
     }
-    
-    if (req.url === '/taixiumd5') {
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+
+    if (req.url === "/taixiumd5") {
+        res.writeHead(200, {
+            "Content-Type": "application/json; charset=utf-8"
+        });
         return res.end(JSON.stringify(getCleanPrediction(cacheHistoryMD5)));
     }
 
-    if (req.url === '/get-live-data') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ taixiu: cacheHistoryTaiXiu, md5: cacheHistoryMD5 }));
+    if (req.url === "/get-live-data") {
+        res.writeHead(200, {
+            "Content-Type": "application/json; charset=utf-8"
+        });
+        return res.end(JSON.stringify({
+            taixiu: cacheHistoryTaiXiu,
+            md5: cacheHistoryMD5
+        }));
     }
 
-    // TRANG 1: CHỈ XEM BẢNG TÀI XỈU THƯỜNG THU NHỎ Ở GIỮA MÀN HÌNH
-    if (req.url === '/lichsutx') {
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        return res.end(`<!DOCTYPE html><html lang="vi"><head><meta charset="UTF-8"><title>Sảnh Thường VIPPRO</title>
-        <link href="https://jsdelivr.net" rel="stylesheet"><style>${SHARED_STYLE}</style></head><body>
-        <div class="container py-4"><div class="header-wrapper text-center mb-4"><h3 class="vipro-title text-uppercase m-0">🔴 SẢNH TÀI XỈU TRUYỀN THỐNG</h3><p class="text-muted mt-2 mb-0">Nhà phát triển: ${USER_ID}</p></div>
-        <div class="row justify-content-center"><div class="col-sm-12 col-md-10 col-xl-8"><div class="neon-box neon-tx"><div class="table-responsive" style="max-height:750px;"><table class="table table-sm"><thead class="sticky-top"><tr><th>Mã Phiên</th><th>Xúc Xắc</th><th>Tổng</th><th>Kết Quả</th><th>Dự Đoán</th><th>Độ Tin</th><th>Cầu Khớp</th><th>Trạng Thái</th></tr></thead><tbody id="table-body"></tbody></table></div></div></div></div></div>
-        <script>${getScriptContent('taixiu')}</script></body></html>`);
+    // =========================
+    // HTML TÀI XỈU
+    // =========================
+    if (req.url === "/lichsutx") {
+        res.writeHead(200, {
+            "Content-Type": "text/html; charset=utf-8"
+        });
+
+        return res.end(`<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<title>Sảnh Thường VIPPRO</title>
+<link href="https://jsdelivr.net" rel="stylesheet">
+<style>${SHARED_STYLE}</style>
+</head>
+
+<body>
+
+<div class="container py-4">
+
+<div class="header-wrapper text-center mb-4">
+<h3 class="vipro-title text-uppercase m-0">🔴 SẢNH TÀI XỈU TRUYỀN THỐNG</h3>
+<p class="text-muted mt-2 mb-0">Nhà phát triển: ${USER_ID}</p>
+</div>
+
+<div class="row justify-content-center">
+
+<div class="col-sm-12 col-md-10 col-xl-8">
+
+<div class="neon-box neon-tx">
+
+<div class="table-responsive" style="max-height:750px;">
+
+<table class="table table-sm">
+
+<thead class="sticky-top">
+<tr>
+<th>Mã Phiên</th>
+<th>Xúc Xắc</th>
+<th>Tổng</th>
+<th>Kết Quả</th>
+<th>Dự Đoán</th>
+<th>Độ Tin</th>
+<th>Cầu Khớp</th>
+<th>Trạng Thái</th>
+</tr>
+</thead>
+
+<tbody id="table-body"></tbody>
+
+</table>
+
+</div>
+
+</div>
+
+</div>
+
+</div>
+
+</div>
+
+<script>${getScriptContent("taixiu")}</script>
+
+</body>
+</html>`);
     }
 
-    // TRANG 2: CHỈ XEM BẢNG MD5 THU NHỎ Ở GIỮA MÀN HÌNH
-    if (req.url === '/lichsumd5') {
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        return res.end(`<!DOCTYPE html><html lang="vi"><head><meta charset="UTF-8"><title>Sảnh MD5 VIPPRO</title>
-        <link href="https://jsdelivr.net" rel="stylesheet"><style>${SHARED_STYLE}</style></head><body>
-        <div class="container py-4"><div class="header-wrapper text-center mb-4"><h3 class="vipro-title text-uppercase m-0">⚡ SẢNH TÀI XỈU MD5 PREMIUM</h3><p class="text-muted mt-2 mb-0">Nhà phát triển: ${USER_ID}</p></div>
-        <div class="row justify-content-center"><div class="col-sm-12 col-md-10 col-xl-8"><div class="neon-box neon-md5"><div class="table-responsive" style="max-height:750px;"><table class="table table-sm"><thead class="sticky-top"><tr><th>Mã Phiên</th><th>Xúc Xắc</th><th>Tổng</th><th>Kết Quả</th><th>Dự Đoán</th><th>Độ Tin</th><th>Cầu Khớp</th><th>Trạng Thái</th></tr></thead><tbody id="table-body"></tbody></table></div></div></div></div></div>
-        <script>${getScriptContent('md5')}</script></body></html>`);
+    // =========================
+    // HTML MD5
+    // =========================
+    if (req.url === "/lichsumd5") {
+
+        res.writeHead(200, {
+            "Content-Type": "text/html; charset=utf-8"
+        });
+
+        return res.end(`<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<title>Sảnh MD5 VIPPRO</title>
+<link href="https://jsdelivr.net" rel="stylesheet">
+<style>${SHARED_STYLE}</style>
+</head>
+
+<body>
+
+<div class="container py-4">
+
+<div class="header-wrapper text-center mb-4">
+<h3 class="vipro-title text-uppercase m-0">⚡ SẢNH TÀI XỈU MD5 PREMIUM</h3>
+<p class="text-muted mt-2 mb-0">Nhà phát triển: ${USER_ID}</p>
+</div>
+
+<div class="row justify-content-center">
+
+<div class="col-sm-12 col-md-10 col-xl-8">
+
+<div class="neon-box neon-md5">
+
+<div class="table-responsive" style="max-height:750px;">
+
+<table class="table table-sm">
+
+<thead class="sticky-top">
+<tr>
+<th>Mã Phiên</th>
+<th>Xúc Xắc</th>
+<th>Tổng</th>
+<th>Kết Quả</th>
+<th>Dự Đoán</th>
+<th>Độ Tin</th>
+<th>Cầu Khớp</th>
+<th>Trạng Thái</th>
+</tr>
+</thead>
+
+<tbody id="table-body"></tbody>
+
+</table>
+
+</div>
+
+</div>
+
+</div>
+
+</div>
+
+</div>
+
+<script>${getScriptContent("md5")}</script>
+
+</body>
+</html>`);
     }
 
-    // Health check cho Render/UptimeRobot
+    // =========================
+    // Health Check
+    // =========================
     if (req.url === "/") {
-        res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+        res.writeHead(200, {
+            "Content-Type": "text/plain; charset=utf-8"
+        });
+
         return res.end("API ONLINE");
     }
 
     if (req.url === "/health") {
-        res.writeHead(200, { "Content-Type": "application/json" });
+
+        res.writeHead(200, {
+            "Content-Type": "application/json"
+        });
+
         return res.end(JSON.stringify({
             status: "ok",
             uptime: process.uptime()
         }));
     }
 
-    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    // =========================
+    // 404
+    // =========================
+    res.writeHead(404, {
+        "Content-Type": "text/plain; charset=utf-8"
+    });
+
     res.end("Cổng kết nối không tồn tại.");
+
 });
-// Khởi chạy lắng nghe cổng 3000
+
+// =========================
+// Khởi động Server
+// =========================
 server.listen(PORT, () => {
-    console.log("\n==================================================================");
-    console.log(`🚀 MÁY CHỦ API DỰ ĐOÁN CHUẨN ĐÃ KHỞI CHẠY TẠI PORT: ${PORT}`);
-    console.log("==================================================================");
-    console.log(`👉 Cổng JSON Bot sảnh thường: http://localhost:${PORT}/taixiu`);
-    console.log(`👉 Cổng JSON Bot sảnh MD5:    http://localhost:${PORT}/taixiumd5`);
-    console.log(`👉 Xem Bảng Nhỏ Sảnh Thường: http://localhost:${PORT}/lichsutx`);
-    console.log(`👉 Xem Bảng Nhỏ Sảnh MD5:    http://localhost:${PORT}/lichsumd5`);
-    console.log("==================================================================\n");
+
+    console.log("===============================================");
+    console.log(`🚀 Server chạy tại PORT ${PORT}`);
+    console.log(`👉 API TX     : http://localhost:${PORT}/taixiu`);
+    console.log(`👉 API MD5    : http://localhost:${PORT}/taixiumd5`);
+    console.log(`👉 Lịch sử TX : http://localhost:${PORT}/lichsutx`);
+    console.log(`👉 Lịch sử MD5: http://localhost:${PORT}/lichsumd5`);
+    console.log("===============================================");
+
 });
